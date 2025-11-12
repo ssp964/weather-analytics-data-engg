@@ -1,0 +1,21 @@
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: airbyte-minio-server
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - /Volumes/T7SSP/Projects/weather-analytics-data-engg/raw_data:/data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    networks:
+      - airbyte-network
+
+networks:
+  airbyte-network:
+    external: false
+

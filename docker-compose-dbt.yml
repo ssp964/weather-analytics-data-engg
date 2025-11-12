@@ -1,0 +1,26 @@
+services:
+  dbt:
+    build:
+      context: ./dbt
+      dockerfile: Dockerfile
+    container_name: weather-dbt
+    volumes:
+      - /Volumes/T7SSP/Projects/weather-analytics-data-engg/dbt:/usr/app
+    working_dir: /usr/app
+    networks:
+      - kind
+      - airbyte-network
+    environment:
+      - DBT_PROFILES_DIR=/usr/app
+      - PYTHONUNBUFFERED=1
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["tail -f /dev/null"]
+    restart: unless-stopped
+
+networks:
+  kind:
+    external: true
+  airbyte-network:
+    name: weather-analytics-data-engg_airbyte-network
+    external: false
+

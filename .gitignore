@@ -1,0 +1,62 @@
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/profiles.yml
+*.db
+*.duckdb
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files (optional - uncomment if you don't want to track data files)
+# raw_data/
+
+# Docker
+*.log
+
+# Environment variables and credentials
+.env
+.env.local
+.env.*
+*.env
+!*.env.example
+!*.env.template
+*credentials*
+*secrets*
+
+# Configuration files with sensitive data
+**/profiles.yml
+**/config.yml
+**/secrets.yml
+
+# Airflow specific
+airflow/.env
+airflow/logs/
+airflow/plugins/__pycache__/
+
+# dbt specific
+dbt/profiles.yml
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+
+# Raw data (uncomment if you don't want to track data files)
+# raw_data/
+

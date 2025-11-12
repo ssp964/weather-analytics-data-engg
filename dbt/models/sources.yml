@@ -1,0 +1,18 @@
+version: 2
+
+sources:
+  - name: raw
+    description: Raw data loaded from MinIO/Airbyte
+    database: WEATHERANALYTICS
+    schema: RAW
+    tables:
+      - name: raw_history_json
+        description: Raw JSONL from History API loaded from MinIO (no flattening)
+        columns:
+          - name: payload
+            description: Raw JSONL payload from History API (VARIANT type)
+          - name: file_name
+            description: Source file name/path from MinIO (for lineage)
+          - name: loaded_at
+            description: Ingestion timestamp (TIMESTAMP_NTZ)
+

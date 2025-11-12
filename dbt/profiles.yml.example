@@ -1,0 +1,15 @@
+weather_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: <your-account-identifier>  # Get from Snowflake UI: Profile → Account → Account Details → Config File
+      user: <your-username>  # Get from Snowflake UI: Profile → Account → Account Details → Config File
+      password: <your-password>  # Your Snowflake password
+      role: <your-role>  # Get from Snowflake UI: Profile → Account → Account Details → Config File (e.g., ACCOUNTADMIN)
+      database: <your-database>  # Select from dropdown in Config File section
+      warehouse: <your-warehouse>  # Get from Snowflake UI: Profile → Account → Account Details → Config File (e.g., COMPUTE_WH)
+      schema: <your-schema>  # Select from dropdown in Config File section
+      threads: 4
+      client_session_keep_alive: false
+
