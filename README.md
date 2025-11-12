@@ -16,6 +16,11 @@ Airbyte → MinIO (S3) → Snowflake → dbt Transformations → Analytics
 - **Snowflake**: Data warehouse
 - **dbt**: Data transformations
 
+### Airflow DAGs
+
+- `weather_ingestion_pipeline`: Updates city metadata, drives Airbyte syncs, and writes raw files to MinIO.
+- `minio_to_snowflake_loader`: Polls MinIO on a short interval and streams newly written JSON files into `WEATHERANALYTICS.WEATHER_ANALYTICS.raw_history_json` without waiting for the main ingestion DAG to finish.
+
 ## Quick Start
 
 ### Prerequisites

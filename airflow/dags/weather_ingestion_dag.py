@@ -16,18 +16,67 @@ Connections required:
 - OpenWeather API: Requires API key
 """
 
-from datetime import datetime, timedelta
-from contextlib import contextmanager
-from typing import List, Dict, Optional, Any
 import base64
 import os
 import time
+import re
+from datetime import datetime, timedelta
+from contextlib import contextmanager
+from typing import List, Dict, Optional, Any
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.models import Variable
 from airflow.hooks.base import BaseHook
 import requests
 import snowflake.connector
+
+# Import verification utilities
+# Add dags directory to Python path for Airflow compatibility
+import sys
+from pathlib import Path
+
+# Get the dags directory (parent of this file)
+dag_dir = Path(__file__).parent.absolute()
+# Add dags directory to path if not already there
+if str(dag_dir) not in sys.path:
+    sys.path.insert(0, str(dag_dir))
+
+# Now import from utils package
+dag_dir = Path(__file__).parent.resolve()
+utils_dir = dag_dir / "utils"
+
+for path in (dag_dir, utils_dir):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
+try:
+    from connector_utils import (
+        check_minio_connection,
+        check_airbyte_connection,
+        check_snowflake_connection,
+        get_config_value,
+        get_snowflake_config,
+        get_snowflake_connection,
+        get_airbyte_access_token,
+        get_airbyte_auth_headers,
+        execute_snowflake_query,
+        execute_snowflake_update,
+    )
+except ModuleNotFoundError:
+    from utils.connector_utils import (
+        check_minio_connection,
+        check_airbyte_connection,
+        check_snowflake_connection,
+        verify_minio_data,
+        get_config_value,
+        get_snowflake_config,
+        get_snowflake_connection,
+        get_airbyte_access_token,
+        get_airbyte_auth_headers,
+        execute_snowflake_query,
+        execute_snowflake_update,
+    )
 
 # Default arguments for the DAG
 default_args = {
@@ -52,55 +101,8 @@ dag = DAG(
 )
 
 
-# Configuration - Uses Airflow Variables with fallback to environment variables
-# To set in Airflow UI: Admin -> Variables -> Add new variable
-# Priority: Airflow Variable > Environment Variable > Error if not set
-def get_config_value(var_name: str, env_name: str = None) -> str:
-    """
-    Get configuration value from Airflow Variables or environment variables.
-    Raises ValueError if not found in either location.
-
-    Args:
-        var_name: Airflow Variable name
-        env_name: Environment variable name (defaults to var_name if not provided)
-
-    Returns:
-        Configuration value as string
-    """
-    if env_name is None:
-        env_name = var_name
-
-    # Try Airflow Variable first
-    try:
-        value = Variable.get(var_name)
-        if value:
-            return value
-    except KeyError:
-        pass
-
-    # Fallback to environment variable
-    value = os.getenv(env_name)
-    if value:
-        return value
-
-    # Raise error if not found
-    raise ValueError(
-        f"Configuration '{var_name}' not found. "
-        f"Please set it in Airflow Variables (Admin -> Variables) or as environment variable '{env_name}'"
-    )
-
-
-def get_snowflake_config() -> Dict[str, str]:
-    """Get Snowflake configuration from Airflow Variables or environment variables"""
-    return {
-        "account": get_config_value("SNOWFLAKE_ACCOUNT"),
-        "user": get_config_value("SNOWFLAKE_USER"),
-        "password": get_config_value("SNOWFLAKE_PASSWORD"),
-        "warehouse": get_config_value("SNOWFLAKE_WAREHOUSE"),
-        "database": get_config_value("SNOWFLAKE_DATABASE"),
-        "schema": get_config_value("SNOWFLAKE_SCHEMA"),
-        "role": get_config_value("SNOWFLAKE_ROLE"),
-    }
+# Configuration functions are now imported from utils.connector_utils
+# get_config_value, get_snowflake_config, get_snowflake_connection are available
 
 
 def get_openweather_api_key() -> str:
@@ -111,262 +113,7 @@ def get_openweather_api_key() -> str:
 TABLE_NAME = "WEATHERANALYTICS.WEATHER_ANALYTICS.city_registry"
 INGESTION_STATE_TABLE = "WEATHERANALYTICS.WEATHER_ANALYTICS.ingestion_state"
 
-
-# ============================================================================
-# Helper Functions for Snowflake Operations
-# ============================================================================
-
-
-@contextmanager
-def get_snowflake_connection():
-    """
-    Context manager for Snowflake connections.
-    Ensures proper connection cleanup even if errors occur.
-
-    Yields:
-        snowflake.connector.SnowflakeConnection: Active Snowflake connection
-    """
-    config = get_snowflake_config()
-    conn = None
-    try:
-        conn = snowflake.connector.connect(
-            account=config["account"],
-            user=config["user"],
-            password=config["password"],
-            warehouse=config["warehouse"],
-            database=config["database"],
-            schema=config["schema"],
-            role=config["role"],
-        )
-        yield conn
-    finally:
-        if conn:
-            conn.close()
-
-
-def execute_snowflake_query(
-    query: str, params: Optional[Dict[str, Any]] = None
-) -> List[tuple]:
-    """
-    Execute a SELECT query and return results.
-
-    Args:
-        query: SQL query string
-        params: Optional dictionary of parameters for parameterized queries
-
-    Returns:
-        List of tuples containing query results
-    """
-    with get_snowflake_connection() as conn:
-        with conn.cursor() as cursor:
-            if params:
-                cursor.execute(query, params)
-            else:
-                cursor.execute(query)
-            return cursor.fetchall()
-
-
-def execute_snowflake_update(query: str, params: Dict[str, Any]) -> int:
-    """
-    Execute an UPDATE/INSERT/DELETE query.
-
-    Args:
-        query: SQL query string
-        params: Dictionary of parameters for parameterized queries
-
-    Returns:
-        Number of rows affected
-    """
-    with get_snowflake_connection() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute(query, params)
-            rows_affected = cursor.rowcount
-            conn.commit()
-            return rows_affected
-
-
-# ============================================================================
-# Connection Check Functions
-# ============================================================================
-
-
-def check_minio_connection(**context) -> bool:
-    """Check if MinIO is accessible"""
-    try:
-        minio_url = "http://airbyte-minio-server:9000/minio/health/live"
-        response = requests.get(minio_url, timeout=5)
-        if response.status_code == 200:
-            print("[SUCCESS] MinIO connection successful")
-            return True
-        else:
-            print(f"[ERROR] MinIO connection failed: {response.status_code}")
-            return False
-    except Exception as e:
-        print(f"[ERROR] MinIO connection error: {str(e)}")
-        raise
-
-
-def get_airbyte_access_token() -> str:
-    """
-    Generate an access token for Airbyte API using Client ID and Client Secret.
-    Tokens expire in 15 minutes (900 seconds).
-
-    Returns:
-        Access token string
-    """
-    try:
-        client_id = get_config_value("AIRBYTE_CLIENT_ID")
-        client_secret = get_config_value("AIRBYTE_CLIENT_SECRET")
-
-        token_url = (
-            "http://airbyte-abctl-control-plane:80/api/public/v1/applications/token"
-        )
-        payload = {
-            "client_id": client_id,
-            "client_secret": client_secret,
-        }
-
-        response = requests.post(token_url, json=payload, timeout=30)
-
-        if response.status_code == 200:
-            token_data = response.json()
-            access_token = token_data.get("access_token")
-            if access_token:
-                print("[SUCCESS] Generated Airbyte access token")
-                return access_token
-            else:
-                raise Exception("Access token not found in response")
-        else:
-            raise Exception(
-                f"Failed to generate access token: HTTP {response.status_code} - {response.text}"
-            )
-
-    except ValueError as e:
-        raise Exception(f"Airbyte Client ID or Client Secret not configured: {str(e)}")
-    except Exception as e:
-        print(f"[ERROR] Error generating Airbyte access token: {str(e)}")
-        raise
-
-
-def get_airbyte_auth_headers() -> Dict[str, str]:
-    """
-    Get authentication headers for Airbyte API.
-    Uses Bearer token authentication (access token).
-    """
-    headers = {"Content-Type": "application/json"}
-
-    try:
-        access_token = get_airbyte_access_token()
-        headers["Authorization"] = f"Bearer {access_token}"
-        return headers
-    except Exception as e:
-        print(f"[ERROR] Failed to get Airbyte authentication: {str(e)}")
-        raise
-
-
-def check_airbyte_connection(**context) -> bool:
-    """
-    Check if Airbyte API is accessible and optionally verify connection exists.
-    If AIRBYTE_CONNECTION_ID is set, verifies the connection exists.
-    Otherwise, just checks if Airbyte service is healthy.
-
-    Authentication: Uses AIRBYTE_CLIENT_ID/AIRBYTE_CLIENT_SECRET (Bearer token) if configured.
-    """
-    try:
-        # Get authentication headers
-        headers = get_airbyte_auth_headers()
-
-        # First, check if Airbyte service is accessible
-        health_url = "http://airbyte-abctl-control-plane:80/api/public/v1/health"
-        response = requests.get(health_url, headers=headers, timeout=5)
-        if response.status_code != 200:
-            print(
-                f"[ERROR] Airbyte service health check failed: {response.status_code}"
-            )
-            return False
-
-        print("[SUCCESS] Airbyte service is accessible")
-
-        # If connection ID is configured, verify the connection exists
-        try:
-            connection_id = get_config_value("AIRBYTE_CONNECTION_ID")
-            if connection_id:
-                # Verify connection exists by fetching it
-                connection_url = f"http://airbyte-abctl-control-plane:80/api/public/v1/connections/{connection_id}"
-                conn_response = requests.get(connection_url, headers=headers, timeout=5)
-
-                if conn_response.status_code == 200:
-                    connection_data = conn_response.json()
-                    print(
-                        f"[SUCCESS] Airbyte connection '{connection_id}' exists and is valid"
-                    )
-                    print(f"Connection name: {connection_data.get('name', 'N/A')}")
-                    return True
-                elif conn_response.status_code == 401:
-                    print(
-                        f"[ERROR] Airbyte API authentication failed (401 Unauthorized)"
-                    )
-                    print("[WARNING] Please configure Airbyte authentication:")
-                    print(
-                        "  - Set AIRBYTE_CLIENT_ID and AIRBYTE_CLIENT_SECRET (Bearer token)"
-                    )
-                    return False
-                elif conn_response.status_code == 404:
-                    print(f"[ERROR] Airbyte connection '{connection_id}' not found")
-                    print(
-                        "[WARNING] Please create the connection in Airbyte UI or update AIRBYTE_CONNECTION_ID"
-                    )
-                    return False
-                else:
-                    print(
-                        f"[ERROR] Failed to verify connection: HTTP {conn_response.status_code}"
-                    )
-                    print(f"Response: {conn_response.text[:200]}")
-                    return False
-            else:
-                print(
-                    "[INFO] AIRBYTE_CONNECTION_ID not set. Skipping connection verification."
-                )
-                print(
-                    "[INFO] Airbyte service is healthy, but no connection configured."
-                )
-                return True
-        except ValueError:
-            # AIRBYTE_CONNECTION_ID not set - that's okay, just check service health
-            print(
-                "[INFO] AIRBYTE_CONNECTION_ID not configured. Only checking service health."
-            )
-            print(
-                "[INFO] Airbyte service is healthy. Set AIRBYTE_CONNECTION_ID to verify specific connection."
-            )
-            return True
-
-    except requests.exceptions.RequestException as e:
-        print(f"[ERROR] Airbyte connection error: {str(e)}")
-        print("[ERROR] Cannot reach Airbyte service. Is it running?")
-        raise
-    except Exception as e:
-        print(f"[ERROR] Unexpected error checking Airbyte: {str(e)}")
-        raise
-
-
-def check_snowflake_connection(**context) -> bool:
-    """Check if Snowflake is accessible"""
-    try:
-        with get_snowflake_connection() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT CURRENT_VERSION()")
-                version = cursor.fetchone()[0]
-                print(f"[SUCCESS] Snowflake connection successful (Version: {version})")
-                return True
-    except Exception as e:
-        print(f"[ERROR] Snowflake connection error: {str(e)}")
-        raise
-
-
-# ============================================================================
 # Data Processing Functions
-# ============================================================================
 
 
 def update_city_coordinates(**context) -> int:
@@ -541,9 +288,7 @@ def update_city_coordinates(**context) -> int:
         raise
 
 
-# ============================================================================
-# Placeholder Functions (To be implemented)
-# ============================================================================
+# Placeholder functions (to be implemented)
 
 
 def trigger_airbyte_sync(**context) -> Dict[str, Any]:
@@ -626,77 +371,9 @@ def trigger_airbyte_sync(**context) -> Dict[str, Any]:
         raise
 
 
-def verify_minio_data(**context) -> bool:
-    """
-    Verify data was stored in MinIO.
-    Checks if the bucket exists and contains recent files.
-    """
-    try:
-        import boto3
-        from botocore.client import Config
+# verify_minio_data is now imported from utils.connector_utils
 
-        # Get MinIO configuration from Airflow Variables or environment
-        try:
-            minio_endpoint = get_config_value("MINIO_ENDPOINT")
-            minio_access_key = get_config_value("MINIO_ACCESS_KEY")
-            minio_secret_key = get_config_value("MINIO_SECRET_KEY")
-            minio_bucket = get_config_value("MINIO_BUCKET")
-        except ValueError as e:
-            print(f"[ERROR] MinIO configuration missing: {str(e)}")
-            return False
-
-        # Create S3 client for MinIO
-        s3_client = boto3.client(
-            "s3",
-            endpoint_url=minio_endpoint,
-            aws_access_key_id=minio_access_key,
-            aws_secret_access_key=minio_secret_key,
-            config=Config(signature_version="s3v4"),
-        )
-
-        # Check if bucket exists
-        try:
-            s3_client.head_bucket(Bucket=minio_bucket)
-            print(f"[SUCCESS] MinIO bucket '{minio_bucket}' exists")
-        except Exception as e:
-            print(f"[ERROR] MinIO bucket '{minio_bucket}' not found: {str(e)}")
-            return False
-
-        # List recent objects (last 24 hours)
-        cutoff_time = datetime.now() - timedelta(hours=24)
-        try:
-            response = s3_client.list_objects_v2(Bucket=minio_bucket, MaxKeys=10)
-            if "Contents" in response:
-                recent_files = [
-                    obj["Key"]
-                    for obj in response["Contents"]
-                    if obj["LastModified"].replace(tzinfo=None) > cutoff_time
-                ]
-                print(
-                    f"[SUCCESS] Found {len(recent_files)} recent files in MinIO bucket"
-                )
-                if recent_files:
-                    print(f"  Recent files: {', '.join(recent_files[:5])}")
-                return True
-            else:
-                print(f"[WARNING] MinIO bucket '{minio_bucket}' is empty")
-                return True  # Empty bucket is not necessarily an error
-        except Exception as e:
-            print(f"[ERROR] Error listing MinIO objects: {str(e)}")
-            return False
-
-    except ImportError:
-        print("[WARNING] boto3 not installed. Skipping MinIO verification.")
-        print("  Install with: pip install boto3")
-        return True  # Don't fail if boto3 is not available
-    except Exception as e:
-        print(f"[ERROR] Error verifying MinIO data: {str(e)}")
-        return False
-
-
-# ============================================================================
-# Airbyte Batch Processing Functions
-# ============================================================================
+# Airbyte batch processing functions
 
 
 def datetime_to_unix_timestamp(dt: datetime) -> int:
@@ -794,21 +471,39 @@ def get_cities_for_ingestion() -> List[Dict[str, Any]]:
         raise
 
 
-def get_city_id(city_name: str, country_code: str, start_date: datetime) -> int:
+def get_city_id(
+    city_name: str,
+    country_code: str,
+    start_date: datetime,
+    state_code: Optional[str] = None,
+) -> str:
     """
-    Generate a unique city_id from city_name, country_code, and start_date.
-    Uses hash to create a consistent numeric ID.
-    """
-    import hashlib
+    Generate a readable city_id from city_name, country_code, and optional state_code.
+    The format is:
 
-    unique_string = f"{city_name}_{country_code}_{start_date.isoformat()}"
-    hash_obj = hashlib.md5(unique_string.encode())
-    # Convert first 8 hex digits to integer (fits in NUMBER(10,0))
-    return int(hash_obj.hexdigest()[:8], 16) % 10000000000
+        <city>_<country>_<state>
+
+    All components are sanitized (spaces -> underscores, alphanumeric + _- only).
+    """
+
+    def sanitize(value: str) -> str:
+        sanitized = value.strip().replace(" ", "_")
+        return re.sub(r"[^A-Za-z0-9_-]", "", sanitized)
+
+    city_part = sanitize(city_name)
+    country_part = sanitize(country_code)
+    state_part = sanitize(state_code) if state_code else ""
+    date_part = start_date.strftime("%Y%m%d")
+
+    components = [city_part, country_part]
+    if state_part:
+        components.append(state_part)
+
+    return "_".join(filter(None, components))
 
 
 def update_ingestion_state(
-    city_id: int,
+    city_id: str,
     started_at: datetime,
     finished_at: datetime,
     job_status: str,
@@ -819,7 +514,7 @@ def update_ingestion_state(
     Update or insert ingestion_state record.
 
     Args:
-        city_id: Unique city identifier
+        city_id: Unique city identifier string (city_country[-state]-YYYYMMDD)
         started_at: Batch start datetime (used for INSERT, or preserved if preserve_started_at=True)
         finished_at: Batch end datetime (updated only if preserve_finished_at=False)
         job_status: Status ('running', 'partial', or 'completed')
@@ -1594,6 +1289,7 @@ def process_weather_ingestion_batches(**context) -> Dict[str, Any]:
         for city in cities:
             city_name = city["city_name"]
             country_code = city["country_code"]
+            state_code = city.get("state_code")
             start_date = city["start_date"]
             end_date = city["end_date"]
             lat = city["lat"]
@@ -1605,7 +1301,7 @@ def process_weather_ingestion_batches(**context) -> Dict[str, Any]:
             )
 
             # Generate city_id
-            city_id = get_city_id(city_name, country_code, start_date)
+            city_id = get_city_id(city_name, country_code, start_date, state_code)
 
             # Create batches
             batches = create_time_batches(
@@ -1789,9 +1485,7 @@ def process_weather_ingestion_batches(**context) -> Dict[str, Any]:
         raise
 
 
-# ============================================================================
-# DAG Task Definitions
-# ============================================================================
+# DAG task definitions
 
 # Task 1: Check MinIO connection
 check_minio = PythonOperator(
@@ -1828,17 +1522,5 @@ process_batches = PythonOperator(
     dag=dag,
 )
 
-# Task 6: Verify data in MinIO
-verify_data = PythonOperator(
-    task_id="verify_minio_data",
-    python_callable=verify_minio_data,
-    dag=dag,
-)
-
 # Define task dependencies
-(
-    [check_minio, check_airbyte, check_snowflake]
-    >> update_coordinates
-    >> process_batches
-    >> verify_data
-)
+([check_minio, check_airbyte, check_snowflake] >> update_coordinates >> process_batches)
