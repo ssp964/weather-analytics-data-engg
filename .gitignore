@@ -25,8 +25,8 @@ env/
 .DS_Store
 Thumbs.db
 
-# Data files (optional - uncomment if you don't want to track data files)
-# raw_data/
+# Data files
+raw_data/
 
 # Docker
 *.log
@@ -57,6 +57,4 @@ dbt/target/
 dbt/dbt_packages/
 dbt/logs/
 
-# Raw data (uncomment if you don't want to track data files)
-# raw_data/
 
