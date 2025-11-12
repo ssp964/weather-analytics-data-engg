@@ -14,8 +14,11 @@ services:
     restart: unless-stopped
     networks:
       - airbyte-network
+      - kind
 
 networks:
   airbyte-network:
     external: false
+  kind:
+    external: true
 
